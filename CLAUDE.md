@@ -69,6 +69,14 @@ Code: `src/engine.rs` (board, pieces, flow, scoring, level numbers, tests),
 - **Levels** (`Level::new`): required 8 + 2 per level (max 30), countdown 24 s
   down to 8, 2.2 s a segment times 0.9 per level (min 0.6), one more locked cell
   per level (max 8), the `nul` sink from level 3. Endless; failing ends the run.
+- **Sound**, all synthesised, no files: a relay click to lay, a crunch to
+  replace, a buzz when refused, ticks for the last three seconds of the
+  countdown, a modem chirp when the data starts; every segment plays the next
+  note up a pentatonic scale, a chord when the target is met; arpeggios for a
+  loop and the five-loop bonus, a gurgle for a buffer, a drain swirl for `nul`,
+  hiss and falling gurgle for a broken pipe. While data flows, a hum and a
+  modem-like chatter whose rate follows the flow (busier with more fronts). M
+  mutes, `--mute` starts muted.
 - Pieces dealt from a shuffled bag of 13 (two of each straight and corner, one
   crossover), plus one of each tee from level 2 (17), Tetris-style. Plain random odds (corners 14% each) were tried first
   and left David waiting on one corner for too long (2026-10-05); with the bag a
@@ -162,4 +170,5 @@ real-time pressure against a moving front; Ohm is a solver puzzle.
 - [ ] Play and tune the first cut's numbers
 - [x] Crossover plus `tee` splitter (David, 2026-10-05)
 - [x] Buffers, one-way valves, the five-loop bonus (2026-10-05)
-- [ ] Next: sound, versus over iroh
+- [x] Sound (2026-10-05), synthesised in `src/audio.rs` after Panzer's
+- [ ] Next: versus over iroh

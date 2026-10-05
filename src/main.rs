@@ -2,7 +2,7 @@
 //! A spiritual successor to the 1989 pipe-laying classic; mechanics after it,
 //! everything you see our own.
 //!
-//! Run: `cargo run --release [-- --level N]` (`RUST_LOG=debug cargo run --release
+//! Run: `cargo run --release [-- --level N] [--mute]` (`RUST_LOG=debug cargo run --release
 //! 2>sigpipe.log` for a session log). Without a terminal: `cargo run -- --shot SECS
 //! [--level N] [--seed S] [--moves ..] [--size 80x24] [--screen title]` plays SECS
 //! seconds and prints the screen as text (`--cells` for `tools/shot.py`, which
@@ -10,10 +10,12 @@
 //! lays a piece, `F` fast flow, `.` waits a tenth of a second; `--deal "+7J"`
 //! deals those pieces first (`- | L J F 7 +`, the corners by their shape).
 
+mod audio;
 mod engine;
 mod input;
 mod render;
 
+use audio::{Audio, Sfx};
 use engine::{Event, Game, Level, Phase};
 use input::{Act, Input};
 use log::{debug, info};
@@ -51,6 +53,9 @@ struct App {
     cursor: bool,
     quit: bool,
     area: Rect,
+    audio: Audio,
+    /// Segments heard this level, for the climbing notes.
+    heard: u32,
 }
 
 fn seed() -> u64 {
@@ -79,7 +84,7 @@ fn save_hi(hi: i64) {
 }
 
 impl App {
-    fn new(level: u32, hi: i64) -> App {
+    fn new(level: u32, hi: i64, audio: Audio) -> App {
         App {
             screen: Screen::Title,
             game: Game::new(Level::new(level), seed(), 0),
@@ -89,6 +94,8 @@ impl App {
             cursor: true,
             quit: false,
             area: Rect::new(0, 0, 80, 24),
+            audio,
+            heard: 0,
         }
     }
 
@@ -96,6 +103,7 @@ impl App {
         let s = seed();
         self.game = Game::new(Level::new(n), s, score);
         self.screen = Screen::Card;
+        self.heard = 0;
         info!("level {n} (seed {s}): {:?}", self.game.level);
     }
 
@@ -117,15 +125,23 @@ impl App {
             debug!("act {a:?} on {:?}", self.screen);
         }
         match (self.screen, a) {
+            (_, Act::Mute) => {
+                self.audio.toggle_mute();
+                info!("muted {}", self.audio.muted);
+            }
             (_, Act::Quit) => {
                 if self.screen != Screen::Title {
                     self.to_title();
                 }
                 self.quit = true;
             }
-            (Screen::Title, Act::Ok) => self.start_level(1, 0),
+            (Screen::Title, Act::Ok) => {
+                self.audio.play(Sfx::Select);
+                self.start_level(1, 0);
+            }
             (Screen::Title, Act::Back) => self.quit = true,
             (Screen::Card, Act::Ok | Act::Point { click: true, .. }) => {
+                self.audio.play(Sfx::Select);
                 self.screen = Screen::Play;
                 info!("countdown starts");
             }
@@ -168,17 +184,57 @@ impl App {
 
     fn update(&mut self, dt: f32) {
         self.t += dt;
+        let before = self.game.phase;
         if self.screen == Screen::Play {
             self.game.tick(dt);
+        }
+        // the last three seconds of the countdown tick
+        if let (Phase::Countdown { left: a }, Phase::Countdown { left: b }) = (before, self.game.phase)
+            && a.ceil() != b.ceil()
+            && b.ceil() <= 3.0
+        {
+            self.audio.play(Sfx::Tick);
         }
         for e in std::mem::take(&mut self.game.events) {
             match e {
                 Event::Segment { .. } | Event::Placed { .. } | Event::Denied { .. } => debug!("{e:?}"),
                 _ => info!("{e:?}"),
             }
+            self.sound(e);
             if let Event::Done { .. } = e {
                 self.screen = Screen::Result;
             }
+        }
+        let flowing = self.screen == Screen::Play && self.game.phase == Phase::Flowing;
+        let rate = if flowing { 1.0 / self.game.segment_time() } else { 0.0 };
+        self.audio.set_stream(rate, if flowing { self.game.fronts() } else { 0 });
+    }
+
+    fn sound(&mut self, e: Event) {
+        let a = &mut self.audio;
+        match e {
+            Event::Placed { replaced, .. } => a.play(if replaced { Sfx::Replace } else { Sfx::Place }),
+            Event::Denied { .. } => a.play(Sfx::Denied),
+            Event::FlowStarts => a.play(Sfx::Start),
+            Event::Fast(true) => a.play(Sfx::Fast),
+            Event::Fast(false) => {}
+            Event::Segment { looped, buffer, .. } => {
+                self.heard += 1;
+                a.segment(self.heard);
+                if self.heard == self.game.level.required {
+                    a.play(Sfx::Met);
+                }
+                if looped {
+                    let five = self.game.crosses == engine::LOOPS_FOR_BONUS;
+                    a.play(if five { Sfx::LoopsBonus } else { Sfx::Loop });
+                }
+                if buffer {
+                    a.play(Sfx::Buffer);
+                }
+            }
+            Event::Sink => a.play(Sfx::Sink),
+            Event::Spill { .. } => a.play(Sfx::Spill),
+            Event::Done { ok, .. } => a.play(if ok { Sfx::Pass } else { Sfx::Fail }),
         }
     }
 
@@ -296,7 +352,8 @@ fn run(level: u32) -> io::Result<()> {
     let mut terminal = ratatui::init();
     execute!(io::stdout(), EnableMouseCapture)?;
     info!("start, level {level}");
-    let mut app = App::new(level, load_hi());
+    let muted = std::env::args().any(|a| a == "--mute");
+    let mut app = App::new(level, load_hi(), Audio::new(muted));
     // --level skips the title
     if level > 1 {
         app.start_level(level, 0);
@@ -341,7 +398,7 @@ fn run(level: u32) -> io::Result<()> {
 /// With `cells`, one line per cell instead: `x y symbol fg bg`, colours as hex,
 /// for `tools/shot.py` to draw as an image.
 fn shot(secs: f32, level: u32, seed: u64, (moves, deal): (&str, &[engine::Piece]), (w, h): (u16, u16), screen: Option<&str>, cells: bool) {
-    let mut app = App::new(level, 0);
+    let mut app = App::new(level, 0, Audio::new(true));
     app.area = Rect::new(0, 0, w, h);
     app.game = Game::new(Level::new(level), seed, 0);
     app.game.script(deal);

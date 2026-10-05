@@ -1,5 +1,5 @@
 //! Controls: keyboard (arrows, WASD or hjkl to move, Space or Enter to lay, F for
-//! fast flow, P to pause, Esc to go back), the mouse (the cursor follows it, a
+//! fast flow, P to pause, M to mute, Esc to go back), the mouse (the cursor follows it, a
 //! click lays) and every gamepad (d-pad or stick to move with repeat, A to lay, X,
 //! Y or a shoulder for fast flow, Start to pause, B to go back).
 //!
@@ -24,6 +24,7 @@ pub enum Act {
     Ok,
     Fast,
     Pause,
+    Mute,
     Back,
     Quit,
     /// The mouse over a screen cell, and whether it clicked there.
@@ -100,6 +101,7 @@ impl Input {
                     KeyCode::Enter | KeyCode::Char(' ') => Act::Ok,
                     KeyCode::Char('f' | 'F') => Act::Fast,
                     KeyCode::Char('p' | 'P') => Act::Pause,
+                    KeyCode::Char('m' | 'M') => Act::Mute,
                     KeyCode::Esc | KeyCode::Backspace => Act::Back,
                     KeyCode::Char('q' | 'Q') => Act::Quit,
                     _ => return,

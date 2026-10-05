@@ -269,7 +269,9 @@ pub enum Event {
     Placed { piece: Piece, at: (usize, usize), replaced: bool },
     Denied { at: (usize, usize) },
     FlowStarts,
-    Segment { at: (usize, usize), looped: bool },
+    Segment { at: (usize, usize), looped: bool, buffer: bool },
+    /// `nul` swallowed a stream.
+    Sink,
     Fast(bool),
     Spill { at: (usize, usize), dir: Dir },
     Done { ok: bool, sink: bool, sealed: bool, unused: u32, crosses: u32 },
@@ -519,7 +521,20 @@ impl Game {
         self.events.push(Event::Fast(self.fast));
     }
 
-    fn segment_time(&self) -> f32 {
+    /// Arms with data still running through them.
+    pub fn fronts(&self) -> u32 {
+        let running = |a: &Option<Arm>| a.is_some_and(|a| !a.done);
+        self.cells
+            .iter()
+            .map(|c| match c {
+                Cell::Pipe { arms, .. } => arms.iter().filter(|a| running(a)).count() as u32,
+                Cell::Sink { arm, .. } => running(arm) as u32,
+                _ => 0,
+            })
+            .sum()
+    }
+
+    pub fn segment_time(&self) -> f32 {
         if self.fast { FAST_TIME } else { self.level.segment_time }
     }
 
@@ -599,7 +614,10 @@ impl Game {
             };
             let pos = (i % W, i / W);
             match &mut self.cells[i] {
-                Cell::Sink { arm: Some(a), .. } => a.done = true,
+                Cell::Sink { arm: Some(a), .. } => {
+                    a.done = true;
+                    self.events.push(Event::Sink);
+                }
                 Cell::Pipe { piece, arms, wet, fixed } => {
                     let len = fixed.arm_len();
                     let buffer = *fixed == Fixed::Buffer;
@@ -642,7 +660,7 @@ impl Game {
         if buffer {
             self.score += BUFFER_BONUS;
         }
-        self.events.push(Event::Segment { at, looped });
+        self.events.push(Event::Segment { at, looped, buffer });
     }
 
     /// Data leaves `from` toward `dir` at flow time `t`: into the neighbour if it

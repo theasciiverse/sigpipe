@@ -480,7 +480,7 @@ pub fn draw_title(buf: &mut Buffer, area: Rect, hi: i64, last: Option<i64>, t: f
     let help = [
         "move: arrows, WASD, hjkl or the mouse",
         "lay a piece: Space, Enter or click",
-        "fast flow: F      pause: P      back: Esc",
+        "fast flow: F    pause: P    mute: M    back: Esc",
         "gamepad: d-pad, A lay, X fast, Start pause",
     ];
     for (i, h) in help.iter().enumerate() {

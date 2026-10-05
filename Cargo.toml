@@ -8,6 +8,7 @@ description = "Asciiverse pipe-laying race against the data stream, after Pipe M
 ratatui = "0.30"
 log = "0.4"
 env_logger = "0.11"
+rodio = { version = "0.22", default-features = false, features = ["playback"] }
 gilrs = { version = "0.11", optional = true }
 
 [features]
