@@ -8,6 +8,7 @@
 //! tile is a 6 by 6 grid of pixels with the two channels crossing in the middle.
 
 use crate::engine::{Arm, Cell, Dir, Fixed, Game, Phase, Piece, H, QUEUE, SPILL_TIME, W};
+use crate::input::Act;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
@@ -489,13 +490,38 @@ fn stream(buf: &mut Buffer, x0: u16, y0: u16, w: u16, t: f32) {
     }
 }
 
-pub fn draw_title(buf: &mut Buffer, area: Rect, hi: i64, last: Option<i64>, t: f32) {
+const TITLE_W: u16 = 66;
+const TITLE_H: u16 = 21;
+
+fn title_top(area: Rect) -> u16 {
+    area.y + area.height.saturating_sub(TITLE_H) / 2
+}
+
+/// The title's menu: each button's place on screen, its label and what it does.
+pub fn title_buttons(area: Rect) -> Vec<(Rect, &'static str, Act)> {
+    const ITEMS: [(&str, Act); 4] = [("Enter run", Act::Ok), ("V host versus", Act::Host), ("C join versus", Act::Join), ("Q quit", Act::Quit)];
+    let width = |l: &str| l.chars().count() as u16 + 4;
+    let total: u16 = ITEMS.iter().map(|(l, _)| width(l)).sum::<u16>() + 2 * (ITEMS.len() as u16 - 1);
+    let mut x = area.x + area.width.saturating_sub(total) / 2;
+    let y = title_top(area) + 12;
+    ITEMS
+        .iter()
+        .map(|&(label, act)| {
+            let r = Rect::new(x, y, width(label), 1);
+            x += r.width + 2;
+            (r, label, act)
+        })
+        .collect()
+}
+
+/// `hover`: the button under the mouse.
+pub fn draw_title(buf: &mut Buffer, area: Rect, hi: i64, last: Option<i64>, hover: Option<usize>, t: f32) {
     fill(buf, area, BG);
-    if area.width < 54 || area.height < 21 {
+    if area.width < TITLE_W || area.height < TITLE_H {
         too_small(buf, area);
         return;
     }
-    let top = area.y + area.height.saturating_sub(21) / 2;
+    let top = title_top(area);
     for (i, row) in LOGO.iter().enumerate() {
         centered(buf, area, top + i as u16, row, bold(AMBER));
     }
@@ -508,13 +534,16 @@ pub fn draw_title(buf: &mut Buffer, area: Rect, hi: i64, last: Option<i64>, t: f
     if (t * 2.0) as i64 % 2 == 0 {
         put(buf, px + prompt.len() as u16, top + 10, "▌", style(GREEN));
     }
-    centered(buf, area, top + 12, "Enter  run        q  quit", style(TEXT));
+    for (i, (r, label, _)) in title_buttons(area).into_iter().enumerate() {
+        let st = if hover == Some(i) { Style::new().fg(BG).bg(AMBER).add_modifier(Modifier::BOLD) } else { bold(AMBER) };
+        text(buf, r.x, r.y, &format!("[ {label} ]"), st);
+    }
     let help = [
         "move: arrows, WASD, hjkl or the mouse",
         "lay a piece: Space, Enter or click",
         "fast flow: F    pause: P    mute: M    back: Esc",
         "gamepad: d-pad, A lay, X fast, Start pause",
-        "versus on the LAN: V host a match, C connect to one",
+        "versus is on the LAN: host on one machine, join from another",
     ];
     for (i, h) in help.iter().enumerate() {
         centered(buf, area, top + 14 + i as u16, h, style(DIM));
@@ -550,6 +579,15 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn title_buttons_fit_and_do_not_overlap() {
+        let area = Rect::new(0, 0, 80, 24);
+        let b = title_buttons(area);
+        assert!(b.iter().all(|(r, ..)| r.right() <= area.right()));
+        assert!(b.windows(2).all(|w| w[0].0.right() < w[1].0.x));
+        assert!(b.iter().map(|(r, ..)| r.width).sum::<u16>() + 6 <= TITLE_W);
     }
 
     #[test]

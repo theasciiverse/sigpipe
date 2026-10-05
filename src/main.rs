@@ -68,6 +68,8 @@ struct App {
     heard: u32,
     /// A versus match, from its lobby on.
     vs: Option<Versus>,
+    /// The title button under the mouse.
+    hover: Option<usize>,
 }
 
 fn seed() -> u64 {
@@ -109,6 +111,7 @@ impl App {
             audio,
             heard: 0,
             vs: None,
+            hover: None,
         }
     }
 
@@ -158,6 +161,14 @@ impl App {
                 self.start_level(1, 0);
             }
             (Screen::Title, Act::Back) => self.quit = true,
+            (Screen::Title, Act::Point { x, y, click }) => {
+                let buttons = render::title_buttons(self.area);
+                self.hover = buttons.iter().position(|(r, ..)| r.contains((x, y).into()));
+                if click && let Some(i) = self.hover {
+                    self.hover = None;
+                    self.act(buttons[i].2);
+                }
+            }
             (Screen::Title, Act::Host) => {
                 self.audio.play(Sfx::Select);
                 self.vs = Some(Versus::host());
@@ -196,7 +207,7 @@ impl App {
                     }
                 }
             }
-            (Screen::Paused, Act::Pause | Act::Ok) => {
+            (Screen::Paused, Act::Pause | Act::Ok | Act::Point { click: true, .. }) => {
                 self.screen = Screen::Play;
                 info!("fg");
             }
@@ -714,7 +725,7 @@ impl App {
     fn draw(&self, buf: &mut Buffer) {
         let area = buf.area;
         if self.screen == Screen::Title {
-            render::draw_title(buf, area, self.hi, self.last, self.t);
+            render::draw_title(buf, area, self.hi, self.last, self.hover, self.t);
             return;
         }
         if self.screen == Screen::Lobby {
