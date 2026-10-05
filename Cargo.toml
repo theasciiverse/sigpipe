@@ -1,0 +1,18 @@
+[package]
+name = "sigpipe"
+version = "0.1.0"
+edition = "2024"
+description = "Asciiverse pipe-laying race against the data stream, after Pipe Mania; Rust + Ratatui"
+
+[dependencies]
+ratatui = "0.30"
+log = "0.4"
+env_logger = "0.11"
+gilrs = { version = "0.11", optional = true }
+
+[features]
+default = ["gamepad"]
+gamepad = ["dep:gilrs"]
+
+[profile.release]
+debug = 1
