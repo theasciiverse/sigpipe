@@ -7,7 +7,7 @@
 //! channel is the middle row, the vertical one columns 2 and 3, so the inside of a
 //! tile is a 6 by 6 grid of pixels with the two channels crossing in the middle.
 
-use crate::engine::{Arm, Cell, Dir, Game, Phase, Piece, H, QUEUE, SPILL_TIME, W};
+use crate::engine::{Arm, Cell, Dir, Fixed, Game, Phase, Piece, H, QUEUE, SPILL_TIME, W};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
@@ -58,6 +58,21 @@ fn piece_art(p: Piece) -> [&'static str; 3] {
         Piece::TeeNoDown => ["═╝··╚═", "······", "══════"],
         Piece::TeeNoLeft => [" ║··╚═", " ║····", " ║··╔═"],
         Piece::TeeNoRight => ["═╝··║ ", "····║ ", "═╗··║ "],
+    }
+}
+
+/// The board's fixed straights: a buffer is labelled in its wall, a valve has
+/// arrows in its walls pointing the way the data may run.
+fn fixed_art(piece: Piece, fixed: Fixed) -> [&'static str; 3] {
+    let h = piece == Piece::LeftRight;
+    match fixed {
+        Fixed::Buffer if h => ["═@@@══", "······", "══════"],
+        Fixed::Buffer => ["@║··║ ", "@║··║ ", "@║··║ "],
+        Fixed::Valve(Dir::Right) => ["═▸══▸═", "······", "═▸══▸═"],
+        Fixed::Valve(Dir::Left) => ["═◂══◂═", "······", "═◂══◂═"],
+        Fixed::Valve(Dir::Up) => [" ║··║ ", " ▴··▴ ", " ║··║ "],
+        Fixed::Valve(Dir::Down) => [" ║··║ ", " ▾··▾ ", " ║··║ "],
+        Fixed::No => piece_art(piece),
     }
 }
 
@@ -248,8 +263,10 @@ fn draw_piece_cell(buf: &mut Buffer, x0: u16, y0: u16, cell: Cell, cmd: &str, (w
                 }
             }
         }
-        Cell::Pipe { piece, arms, wet } => {
-            let tile = Tile { art: piece_art(piece), label: "", wall, bg, liquid: GREEN };
+        Cell::Pipe { piece, arms, wet, fixed } => {
+            // the board's own pieces are amber, like the process boxes
+            let wall = if fixed == Fixed::No || wall == AMBER { wall } else { mix(AMBER, BG, 0.15) };
+            let tile = Tile { art: fixed_art(piece, fixed), label: "buf", wall, bg, liquid: GREEN };
             draw_tile(buf, x0, y0, &tile, t, &|x, y| lit_pipe(x, y, piece, &arms, wet, clock));
         }
         Cell::Source { out, fill } => {
@@ -361,6 +378,10 @@ pub fn draw_play(buf: &mut Buffer, area: Rect, g: &Game, hud: &Hud, overlay: Opt
     let met = g.piped >= g.level.required;
     item("piped", format!("{}/{}", g.piped, g.level.required), if met { GREEN } else { TEXT });
     item("score", g.score.to_string(), TEXT);
+    if g.crosses > 0 {
+        let col = if g.crosses >= crate::engine::LOOPS_FOR_BONUS { GREEN } else { TEXT };
+        item("loops", format!("{}/{}", g.crosses, crate::engine::LOOPS_FOR_BONUS), col);
+    }
     item("hi", hud.hi.max(g.score).to_string(), DIM);
 
     // the queue, next piece on top
@@ -484,7 +505,7 @@ mod tests {
             let art = piece_art(piece);
             let mut arms = [None; 4];
             for d in Dir::ALL.into_iter().filter(|d| piece.opens(*d)) {
-                arms[d as usize] = Some(Arm { start: 0.0, inward: d == Dir::Up, done: true });
+                arms[d as usize] = Some(Arm { start: 0.0, len: 0.5, inward: d == Dir::Up, done: true });
             }
             for y in 0..6 {
                 for x in 0..6 {

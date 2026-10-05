@@ -56,9 +56,16 @@ Code: `src/engine.rs` (board, pieces, flow, scoring, level numbers, tests),
   the original's flooz is a single stream through a crossover (Wikipedia; Pipe
   Dream reviews), David picked crossover plus tee: both mechanics, each piece
   honest about what it does.
+- **Board specials**, fixed in place, amber like the process boxes: **buffers**
+  (`buf`, from level 4, two from 7), straights the data takes four segments'
+  time to fill, +300; **valves** (from level 5, two from 8), straights with
+  arrows in their walls that let data run only that way: coming at one from the
+  arrow's end breaks the pipe. Both always have both ends on the board.
 - **Score**: 100 a segment (a crossover counts once per pass), 200 on fast flow,
-  +500 for each loop back through a crossover; at the end of a passed level
-  +1000 if `nul` swallowed some; -50 for each laid piece the data never reached.
+  +500 for each loop back through a crossover, +300 for a buffer; at the end of
+  a passed level +5000 for five or more loops (the original's big bonus for
+  five crossovers), +1000 if `nul` swallowed some; -50 for each laid piece the
+  data never reached. The status line counts loops once there is one.
 - **Levels** (`Level::new`): required 8 + 2 per level (max 30), countdown 24 s
   down to 8, 2.2 s a segment times 0.9 per level (min 0.6), one more locked cell
   per level (max 8), the `nul` sink from level 3. Endless; failing ends the run.
@@ -154,5 +161,5 @@ real-time pressure against a moving front; Ohm is a solver puzzle.
   no `sigpipe` command or Debian package on this system to clash with
 - [ ] Play and tune the first cut's numbers
 - [x] Crossover plus `tee` splitter (David, 2026-10-05)
-- [ ] Next: buffers (slow reservoirs), one-way pieces, the original's bonus for
-  five crossover loops in a level, sound, versus over iroh
+- [x] Buffers, one-way valves, the five-loop bonus (2026-10-05)
+- [ ] Next: sound, versus over iroh

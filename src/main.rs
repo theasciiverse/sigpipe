@@ -205,8 +205,14 @@ impl App {
                 if lv.sink {
                     l.push(line("end it in nul (/dev/null) for a bonus", style(DIM)));
                 }
-                if lv.n == engine::TEES_FROM {
-                    l.push(line("new: the tee splits the stream; seal both ends", style(AMBER)));
+                let new = match lv.n {
+                    engine::TEES_FROM => Some("new: the tee splits the stream; seal both ends"),
+                    engine::BUFFERS_FROM => Some("new: buf, a slow tank; fill it for a bonus"),
+                    engine::VALVES_FROM => Some("new: valves, data runs only the arrows' way"),
+                    _ => None,
+                };
+                if let Some(new) = new {
+                    l.push(line(new, style(AMBER)));
                 }
                 l.push(line("", style(TEXT)));
                 l.push(line("Enter to start", bold(AMBER)));
@@ -240,6 +246,9 @@ impl App {
                 };
                 if g.crosses > 0 {
                     l.push(line(&format!("{} loops through a crossover    +{}", g.crosses, g.crosses as i64 * engine::CROSS_BONUS), style(GREEN)));
+                }
+                if ok && g.crosses >= engine::LOOPS_FOR_BONUS {
+                    l.push(line(&format!("{} loops in one level    +{}", g.crosses, engine::LOOPS_BONUS), bold(GREEN)));
                 }
                 if sink && ok {
                     l.push(line(&format!("nul swallowed it all    +{}", engine::SINK_BONUS), style(GREEN)));

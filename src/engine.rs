@@ -32,6 +32,14 @@ pub const SEGMENT_POINTS: i64 = 100;
 pub const FAST_POINTS: i64 = 200;
 /// Data looping back through a crossover the other way.
 pub const CROSS_BONUS: i64 = 500;
+/// Loops back through crossovers in one level for the big bonus, after the
+/// original's bonus for five.
+pub const LOOPS_FOR_BONUS: u32 = 5;
+pub const LOOPS_BONUS: i64 = 5000;
+/// Data filling a buffer.
+pub const BUFFER_BONUS: i64 = 300;
+/// A buffer's arm takes this many segments of flow, so four across.
+pub const BUFFER_ARM: f32 = 2.0;
 pub const REPLACE_COST: i64 = 50;
 /// Each laid piece the data never reached, at the end of a level.
 pub const UNUSED_COST: i64 = 50;
@@ -142,6 +150,8 @@ impl Piece {
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Arm {
     pub start: f32,
+    /// Flow time to fill it.
+    pub len: f32,
     pub inward: bool,
     pub done: bool,
 }
@@ -149,7 +159,32 @@ pub struct Arm {
 impl Arm {
     /// How full the arm is at flow time `clock`, 0 to 1.
     pub fn fill(&self, clock: f32) -> f32 {
-        ((clock - self.start) / ARM).clamp(0.0, 1.0)
+        ((clock - self.start) / self.len).clamp(0.0, 1.0)
+    }
+}
+
+/// What the board came with in a pipe cell: nothing (a piece you laid), or a
+/// fixed straight that can't be replaced.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Fixed {
+    No,
+    /// `buf`: a tank the data takes four segments' time to fill; pays a bonus.
+    Buffer,
+    /// A one-way valve: data only runs toward this way.
+    Valve(Dir),
+}
+
+impl Fixed {
+    /// Whether data may come in through `side`.
+    pub fn admits(self, side: Dir) -> bool {
+        match self {
+            Fixed::Valve(to) => side == to.opposite(),
+            _ => true,
+        }
+    }
+
+    pub fn arm_len(self) -> f32 {
+        if self == Fixed::Buffer { BUFFER_ARM } else { ARM }
     }
 }
 
@@ -160,7 +195,7 @@ pub enum Cell {
     Locked,
     /// `arms` by `Dir`; `wet` once data has reached the middle (on a crossover:
     /// through it either way).
-    Pipe { piece: Piece, arms: [Option<Arm>; 4], wet: bool },
+    Pipe { piece: Piece, arms: [Option<Arm>; 4], wet: bool, fixed: Fixed },
     /// The writing process; `fill` shows the countdown.
     Source { out: Dir, fill: f32 },
     /// `/dev/null`: swallows whatever reaches it, which seals that end.
@@ -169,11 +204,12 @@ pub enum Cell {
 
 impl Cell {
     fn pipe(piece: Piece) -> Cell {
-        Cell::Pipe { piece, arms: [None; 4], wet: false }
+        Cell::Pipe { piece, arms: [None; 4], wet: false, fixed: Fixed::No }
     }
 
+    /// A piece the player laid that the data hasn't reached.
     fn dry(&self) -> bool {
-        matches!(self, Cell::Pipe { arms: [None, None, None, None], .. })
+        matches!(self, Cell::Pipe { arms: [None, None, None, None], fixed: Fixed::No, .. })
     }
 }
 
@@ -189,9 +225,14 @@ pub struct Level {
     pub segment_time: f32,
     pub locked: usize,
     pub sink: bool,
+    pub buffers: usize,
+    pub valves: usize,
     /// The source process's name, three letters at most.
     pub cmd: &'static str,
 }
+
+pub const BUFFERS_FROM: u32 = 4;
+pub const VALVES_FROM: u32 = 5;
 
 const CMDS: [&str; 12] = ["cat", "yes", "seq", "tar", "dd", "ls", "cut", "awk", "sed", "zip", "git", "od"];
 
@@ -206,6 +247,8 @@ impl Level {
             segment_time: (2.2 * 0.9f32.powf(k)).max(0.6),
             locked: (n as usize - 1).min(8),
             sink: n >= 3,
+            buffers: if n >= 7 { 2 } else { (n >= BUFFERS_FROM) as usize },
+            valves: if n >= 8 { 2 } else { (n >= VALVES_FROM) as usize },
             cmd: CMDS[(n as usize - 1) % CMDS.len()],
         }
     }
@@ -324,6 +367,29 @@ impl Game {
                     reserved.extend([pos, mouth]);
                     break;
                 }
+            }
+        }
+        // buffers and valves: straights with both ends on the board and free
+        let mut fixed: Vec<Fixed> = vec![Fixed::Buffer; level.buffers];
+        for _ in 0..level.valves {
+            fixed.push(Fixed::Valve(Dir::ALL[g.rng.below(4)]));
+        }
+        for f in fixed {
+            loop {
+                let pos = (g.rng.below(W), g.rng.below(H));
+                let horizontal = match f {
+                    Fixed::Valve(d) => d.horizontal(),
+                    _ => g.rng.below(2) == 0,
+                };
+                let (a, b) = if horizontal { (Dir::Left, Dir::Right) } else { (Dir::Up, Dir::Down) };
+                let (Some(na), Some(nb)) = (step(pos, a), step(pos, b)) else { continue };
+                if [pos, na, nb].iter().any(|p| reserved.contains(p)) || g.cell(pos) != Cell::Empty {
+                    continue;
+                }
+                let piece = if horizontal { Piece::LeftRight } else { Piece::UpDown };
+                *g.cell_mut(pos) = Cell::Pipe { piece, arms: [None; 4], wet: false, fixed: f };
+                reserved.extend([pos, na, nb]);
+                break;
             }
         }
         let mut locked = 0;
@@ -519,7 +585,7 @@ impl Game {
                         continue;
                     }
                     running = true;
-                    let end = a.start + ARM;
+                    let end = a.start + a.len;
                     if end <= self.clock && next.is_none_or(|(t, ..)| end < t) {
                         next = Some((end, i, k));
                     }
@@ -534,7 +600,9 @@ impl Game {
             let pos = (i % W, i / W);
             match &mut self.cells[i] {
                 Cell::Sink { arm: Some(a), .. } => a.done = true,
-                Cell::Pipe { piece, arms, wet } => {
+                Cell::Pipe { piece, arms, wet, fixed } => {
+                    let len = fixed.arm_len();
+                    let buffer = *fixed == Fixed::Buffer;
                     let a = arms[k].as_mut().expect("a running arm");
                     a.done = true;
                     let dir = Dir::ALL[k];
@@ -544,19 +612,19 @@ impl Game {
                         // straight across, one pass each way
                         let across = dir.opposite() as usize;
                         if arms[across].is_none() {
-                            arms[across] = Some(Arm { start: t, inward: false, done: false });
+                            arms[across] = Some(Arm { start: t, len, inward: false, done: false });
                             let looped = *wet;
                             *wet = true;
-                            self.segment(pos, looped);
+                            self.segment(pos, looped, false);
                         }
                     } else if !*wet {
                         *wet = true;
                         for d in Dir::ALL {
                             if piece.opens(d) && arms[d as usize].is_none() {
-                                arms[d as usize] = Some(Arm { start: t, inward: false, done: false });
+                                arms[d as usize] = Some(Arm { start: t, len, inward: false, done: false });
                             }
                         }
-                        self.segment(pos, false);
+                        self.segment(pos, false, buffer);
                     }
                 }
                 _ => unreachable!("arms are only on pipes and the sink"),
@@ -564,12 +632,15 @@ impl Game {
         }
     }
 
-    fn segment(&mut self, at: (usize, usize), looped: bool) {
+    fn segment(&mut self, at: (usize, usize), looped: bool, buffer: bool) {
         self.piped += 1;
         self.score += if self.fast { FAST_POINTS } else { SEGMENT_POINTS };
         if looped {
             self.crosses += 1;
             self.score += CROSS_BONUS;
+        }
+        if buffer {
+            self.score += BUFFER_BONUS;
         }
         self.events.push(Event::Segment { at, looped });
     }
@@ -580,13 +651,14 @@ impl Game {
         let side = dir.opposite();
         if let Some(pos) = step(from, dir) {
             match self.cell_mut(pos) {
-                Cell::Pipe { piece, arms, .. } if piece.opens(side) => {
+                Cell::Pipe { piece, arms, fixed, .. } if piece.opens(side) && fixed.admits(side) => {
                     // data already there from the other end just meets this
-                    arms[side as usize].get_or_insert(Arm { start: t, inward: true, done: false });
+                    let len = fixed.arm_len();
+                    arms[side as usize].get_or_insert(Arm { start: t, len, inward: true, done: false });
                     return;
                 }
                 Cell::Sink { inlet, arm } if *inlet == side => {
-                    arm.get_or_insert(Arm { start: t, inward: true, done: false });
+                    arm.get_or_insert(Arm { start: t, len: ARM, inward: true, done: false });
                     return;
                 }
                 _ => {}
@@ -604,6 +676,9 @@ impl Game {
         if ok && sink {
             self.score += SINK_BONUS;
         }
+        if ok && self.crosses >= LOOPS_FOR_BONUS {
+            self.score += LOOPS_BONUS;
+        }
         self.phase = Phase::Done { ok, sink, sealed };
         self.events.push(Event::Done { ok, sink, sealed, unused: self.unused, crosses: self.crosses });
     }
@@ -614,7 +689,7 @@ mod tests {
     use super::*;
 
     fn level() -> Level {
-        Level { n: 1, required: 3, countdown: 1.0, segment_time: 0.5, locked: 0, sink: false, cmd: "cat" }
+        Level { n: 1, required: 3, countdown: 1.0, segment_time: 0.5, locked: 0, sink: false, buffers: 0, valves: 0, cmd: "cat" }
     }
 
     fn lay(g: &mut Game, at: (usize, usize), piece: Piece) {
@@ -724,6 +799,53 @@ mod tests {
         assert_eq!(g.score, 4 * SEGMENT_POINTS);
     }
 
+    fn fix(g: &mut Game, at: (usize, usize), piece: Piece, fixed: Fixed) {
+        *g.cell_mut(at) = Cell::Pipe { piece, arms: [None; 4], wet: false, fixed };
+    }
+
+    #[test]
+    fn buffer_is_slow_and_pays() {
+        let mut g = Game::bare(level(), (1, 3), Dir::Right, Rng::new(1));
+        fix(&mut g, (2, 3), Piece::LeftRight, Fixed::Buffer);
+        lay(&mut g, (3, 3), Piece::LeftRight);
+        // in 2 segments, out 2, then the straight: wet at 4.5
+        run(&mut g, 1.0 + 0.5 * 4.4);
+        assert!(!wet(&g, (3, 3)));
+        run(&mut g, 0.5 * 0.2);
+        assert!(wet(&g, (3, 3)));
+        assert_eq!(g.score, 2 * SEGMENT_POINTS + BUFFER_BONUS);
+        g.cursor = (2, 3);
+        assert!(!g.place(), "the board's own pieces stay");
+    }
+
+    #[test]
+    fn valve_only_one_way() {
+        let mut g = Game::bare(level(), (1, 3), Dir::Right, Rng::new(1));
+        fix(&mut g, (2, 3), Piece::LeftRight, Fixed::Valve(Dir::Left));
+        run(&mut g, 1.02);
+        assert!(matches!(g.phase, Phase::Spill { at: (1, 3), dir: Dir::Right, .. }), "against the valve");
+        let mut g = Game::bare(level(), (1, 3), Dir::Right, Rng::new(1));
+        fix(&mut g, (2, 3), Piece::LeftRight, Fixed::Valve(Dir::Right));
+        run(&mut g, 1.6);
+        assert!(wet(&g, (2, 3)));
+    }
+
+    #[test]
+    fn five_loops_pay_big() {
+        // five real loops take most of a board; the loop itself is tested above,
+        // so this checks the bonus on finishing
+        let mut g = Game::bare(level(), (1, 3), Dir::Right, Rng::new(1));
+        g.piped = 10;
+        g.crosses = LOOPS_FOR_BONUS;
+        g.finish(false);
+        assert_eq!(g.score, LOOPS_BONUS);
+        let mut g = Game::bare(level(), (1, 3), Dir::Right, Rng::new(1));
+        g.piped = 10;
+        g.crosses = LOOPS_FOR_BONUS - 1;
+        g.finish(false);
+        assert_eq!(g.score, 0);
+    }
+
     #[test]
     fn replacing_costs_and_locks() {
         let mut g = Game::bare(level(), (1, 3), Dir::Right, Rng::new(1));
@@ -824,6 +946,9 @@ mod tests {
                 assert_eq!(g.cells.iter().filter(|c| matches!(c, Cell::Sink { .. })).count(), g.level.sink as usize);
                 let Cell::Source { out, .. } = g.cell(g.source) else { panic!() };
                 assert_eq!(g.cell(step(g.source, out).unwrap()), Cell::Empty);
+                let fixed = |f: fn(Fixed) -> bool| g.cells.iter().filter(|c| matches!(c, Cell::Pipe { fixed, .. } if f(*fixed))).count();
+                assert_eq!(fixed(|f| f == Fixed::Buffer), g.level.buffers);
+                assert_eq!(fixed(|f| matches!(f, Fixed::Valve(_))), g.level.valves);
             }
         }
     }
