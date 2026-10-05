@@ -52,9 +52,9 @@ fn piece_art(p: Piece) -> [&'static str; 3] {
         Piece::UpLeft => ["═╝··║ ", "····║ ", "════╝ "],
         Piece::DownRight => [" ╔════", " ║····", " ║··╔═"],
         Piece::DownLeft => ["════╗ ", "····║ ", "═╗··║ "],
-        // a bridge: the vertical pipe's walls run through, the horizontal one
-        // goes under
-        Piece::Cross => ["═╣··╠═", "·║··║·", "═╣··╠═"],
+        // a bridge: the vertical pipe's walls run across the horizontal one as
+        // thin rails (`¦`), with its data showing through underneath
+        Piece::Cross => ["═╣··╠═", "·¦··¦·", "═╣··╠═"],
         Piece::TeeNoUp => ["══════", "······", "═╗··╔═"],
         Piece::TeeNoDown => ["═╝··╚═", "······", "══════"],
         Piece::TeeNoLeft => [" ║··╚═", " ║····", " ║··╔═"],
@@ -103,18 +103,17 @@ fn in_channel(x: i32, y: i32, horizontal: bool) -> bool {
 
 /// Whether pixel (x, y) of a pipe holds data. Each arm is the half-channel from
 /// its edge to the middle (depths 0 to 2), filled from the edge if the data runs
-/// in and from the middle if it runs out; once wet, the whole middle is lit. On a
-/// crossover the middle belongs to the vertical pipe on top.
+/// in and from the middle if it runs out; once wet, the whole middle is lit (a
+/// crossover's middle: by the arms through it, either way).
 fn lit_pipe(x: i32, y: i32, piece: Piece, arms: &[Option<Arm>; 4], wet: bool, clock: f32) -> bool {
     let middle = (2..4).contains(&x) && (2..4).contains(&y);
-    let cross = piece == Piece::Cross;
-    if wet && middle && !cross {
+    if wet && middle && piece != Piece::Cross {
         return true;
     }
     Dir::ALL.into_iter().any(|d| {
         let Some(a) = arms[d as usize] else { return false };
         let dep = depth(x, y, d);
-        if !in_channel(x, y, d.horizontal()) || dep > 2 || (cross && middle && d.horizontal()) {
+        if !in_channel(x, y, d.horizontal()) || dep > 2 {
             return false;
         }
         let f = a.fill(clock) * 3.0;
@@ -235,6 +234,12 @@ fn draw_tile(buf: &mut Buffer, x0: u16, y0: u16, tile: &Tile, t: f32, lit: &dyn 
                     let (x, y) = (c as i32, 2 * r as i32);
                     let px = |y: i32| if lit(x, y) { data(sx as i32, sy as i32 * 2 + y % 2, t, tile.liquid) } else { HOLLOW };
                     put(buf, sx, sy, "▀", Style::new().fg(px(y)).bg(px(y + 1)));
+                }
+                // a rail over a channel: the wall line, the data under it
+                '¦' => {
+                    let (x, y) = (c as i32, 2 * r as i32);
+                    let under = if lit(x, y) { data(sx as i32, sy as i32 * 2, t, tile.liquid) } else { HOLLOW };
+                    put(buf, sx, sy, "│", Style::new().fg(tile.wall).bg(under));
                 }
                 '@' => {
                     let l = label.next().unwrap_or(' ');
@@ -571,10 +576,9 @@ mod tests {
             }
             for y in 0..6 {
                 for x in 0..6 {
-                    let inside = art[y as usize / 2].chars().nth(x as usize).unwrap() == '·';
-                    // the bridge's walls hide two pixels of the pipe beneath
-                    let hidden = piece == Cross && (x == 1 || x == 4) && (2..4).contains(&y);
-                    assert_eq!(lit_pipe(x, y, piece, &arms, true, 10.0), inside || hidden, "{piece:?} pixel {x},{y}");
+                    // inside, or under one of the bridge's rails
+                    let inside = matches!(art[y as usize / 2].chars().nth(x as usize).unwrap(), '·' | '¦');
+                    assert_eq!(lit_pipe(x, y, piece, &arms, true, 10.0), inside, "{piece:?} pixel {x},{y}");
                     assert!(!lit_pipe(x, y, piece, &[None; 4], false, 10.0));
                 }
             }
