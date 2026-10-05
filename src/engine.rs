@@ -16,6 +16,8 @@
 //! flow clock counted in segments, so fast flow and frame rate change nothing but
 //! the speed.
 
+use serde::{Deserialize, Serialize};
+
 pub const W: usize = 10;
 pub const H: usize = 7;
 pub const QUEUE: usize = 5;
@@ -45,7 +47,7 @@ pub const REPLACE_COST: i64 = 50;
 pub const UNUSED_COST: i64 = 50;
 pub const SINK_BONUS: i64 = 1000;
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum Dir {
     Up,
     Right,
@@ -86,7 +88,7 @@ pub fn step(pos: (usize, usize), dir: Dir) -> Option<(usize, usize)> {
 }
 
 /// The pieces the queue hands out, named by the sides they open to.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum Piece {
     LeftRight,
     UpDown,
@@ -147,7 +149,7 @@ impl Piece {
 
 /// Data in one arm of a piece: since `start` on the flow clock, running in from
 /// the edge or out from the middle; `done` once it has reached the far end.
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 pub struct Arm {
     pub start: f32,
     /// Flow time to fill it.
@@ -165,7 +167,7 @@ impl Arm {
 
 /// What the board came with in a pipe cell: nothing (a piece you laid), or a
 /// fixed straight that can't be replaced.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum Fixed {
     No,
     /// `buf`: a tank the data takes four segments' time to fill; pays a bonus.
@@ -188,7 +190,7 @@ impl Fixed {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 pub enum Cell {
     Empty,
     /// Nothing can be laid here.
@@ -254,7 +256,7 @@ impl Level {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 pub enum Phase {
     Countdown { left: f32 },
     Flowing,
@@ -298,6 +300,24 @@ const BAG: [Piece; 13] = [
 pub const TEES_FROM: u32 = 2;
 const TEES: [Piece; 4] = [Piece::TeeNoUp, Piece::TeeNoDown, Piece::TeeNoLeft, Piece::TeeNoRight];
 
+/// Seconds a junked cell flashes.
+pub const JUNK_FLASH: f32 = 0.8;
+
+/// A board as a rival sees it, sent over the network.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct View {
+    pub level: u32,
+    pub cells: Vec<Cell>,
+    pub queue: [Piece; QUEUE],
+    pub cursor: (usize, usize),
+    pub phase: Phase,
+    pub clock: f32,
+    pub piped: u32,
+    pub score: i64,
+    pub fast: bool,
+    pub crosses: u32,
+}
+
 /// Small and seedable, so a level can be replayed.
 pub struct Rng(u64);
 
@@ -337,6 +357,8 @@ pub struct Game {
     pub lock: f32,
     /// A cell just blown out by a replacement, and how long it still flashes.
     pub boom: Option<((usize, usize), f32)>,
+    /// Cells a rival's junk just locked, and how long each still flashes.
+    pub junked: Vec<((usize, usize), f32)>,
     /// Laid pieces the data never reached, counted when the level ends.
     pub unused: u32,
     /// Loops back through a crossover.
@@ -422,6 +444,7 @@ impl Game {
             fast: false,
             lock: 0.0,
             boom: None,
+            junked: Vec::new(),
             unused: 0,
             crosses: 0,
             events: Vec::new(),
@@ -521,6 +544,67 @@ impl Game {
         self.events.push(Event::Fast(self.fast));
     }
 
+    /// Lock `count` empty cells, a rival's junk. Spares the cell in front of the
+    /// source, the mouth of `nul` and the cursor, so it hinders without being
+    /// unwinnable. Returns the cells locked.
+    pub fn junk(&mut self, count: u32, seed: u64) -> Vec<(usize, usize)> {
+        let mut rng = Rng::new(seed);
+        let mut spare = vec![self.cursor];
+        if let Cell::Source { out, .. } = self.cell(self.source) {
+            spare.extend(step(self.source, out));
+        }
+        for (i, c) in self.cells.iter().enumerate() {
+            if let Cell::Sink { inlet, .. } = c {
+                spare.extend(step((i % W, i / W), *inlet));
+            }
+        }
+        let mut free: Vec<(usize, usize)> =
+            (0..W * H).map(|i| (i % W, i / W)).filter(|p| self.cell(*p) == Cell::Empty && !spare.contains(p)).collect();
+        let mut hit = Vec::new();
+        for _ in 0..count {
+            if free.is_empty() {
+                break;
+            }
+            let p = free.swap_remove(rng.below(free.len()));
+            *self.cell_mut(p) = Cell::Locked;
+            self.junked.push((p, JUNK_FLASH));
+            hit.push(p);
+        }
+        hit
+    }
+
+    /// What a rival sees of this board.
+    pub fn view(&self) -> View {
+        View {
+            level: self.level.n,
+            cells: self.cells.clone(),
+            queue: self.queue,
+            cursor: self.cursor,
+            phase: self.phase,
+            clock: self.clock,
+            piped: self.piped,
+            score: self.score,
+            fast: self.fast,
+            crosses: self.crosses,
+        }
+    }
+
+    /// A board to draw from a rival's view; it is never ticked.
+    pub fn from_view(v: &View) -> Game {
+        let mut g = Game::bare(Level::new(v.level), (0, 0), Dir::Right, Rng::new(0));
+        g.cells = v.cells.clone();
+        g.source = (0..W * H).map(|i| (i % W, i / W)).find(|p| matches!(g.cell(*p), Cell::Source { .. })).unwrap_or((0, 0));
+        g.queue = v.queue;
+        g.cursor = v.cursor;
+        g.phase = v.phase;
+        g.clock = v.clock;
+        g.piped = v.piped;
+        g.score = v.score;
+        g.fast = v.fast;
+        g.crosses = v.crosses;
+        g
+    }
+
     /// Arms with data still running through them.
     pub fn fronts(&self) -> u32 {
         let running = |a: &Option<Arm>| a.is_some_and(|a| !a.done);
@@ -546,6 +630,10 @@ impl Game {
                 self.boom = None;
             }
         }
+        for (_, t) in &mut self.junked {
+            *t -= dt;
+        }
+        self.junked.retain(|(_, t)| *t > 0.0);
         match self.phase {
             Phase::Countdown { left } => {
                 let left = if self.fast { 0.0 } else { left - dt };
@@ -862,6 +950,36 @@ mod tests {
         g.crosses = LOOPS_FOR_BONUS - 1;
         g.finish(false);
         assert_eq!(g.score, 0);
+    }
+
+    #[test]
+    fn junk_locks_free_cells_only() {
+        let mut g = Game::new(Level::new(3), 5, 0);
+        let Cell::Source { out, .. } = g.cell(g.source) else { panic!() };
+        let front = step(g.source, out).unwrap();
+        let hit = g.junk(200, 9);
+        assert!(!hit.is_empty());
+        assert_eq!(g.cell(front), Cell::Empty, "the source's front stays open");
+        assert_eq!(g.cell(g.cursor), Cell::Empty);
+        assert!(g.cells.iter().filter(|c| **c == Cell::Empty).count() <= 2);
+    }
+
+    #[test]
+    fn view_round_trips_a_board() {
+        let mut g = Game::new(Level::new(6), 3, 0);
+        lay_free(&mut g);
+        run(&mut g, 30.0);
+        let back = Game::from_view(&g.view());
+        assert_eq!(back.cells, g.cells);
+        assert_eq!(back.source, g.source);
+        assert_eq!(back.view(), g.view());
+    }
+
+    fn lay_free(g: &mut Game) {
+        for _ in 0..6 {
+            g.move_cursor(Dir::Right);
+            g.place();
+        }
     }
 
     #[test]

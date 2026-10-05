@@ -13,18 +13,26 @@
 mod audio;
 mod engine;
 mod input;
+mod lan;
+mod net;
+mod proto;
 mod render;
+mod versus;
 
 use audio::{Audio, Sfx};
 use engine::{Event, Game, Level, Phase};
 use input::{Act, Input};
 use log::{debug, info};
 use ratatui::buffer::Buffer;
-use ratatui::crossterm::event::{self, DisableMouseCapture, EnableMouseCapture};
+use ratatui::crossterm::event::{self, DisableFocusChange, DisableMouseCapture, EnableFocusChange, EnableMouseCapture};
 use ratatui::crossterm::execute;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
+use net::Evt;
+use proto::{Msg, RoundEnd};
 use render::{bold, style, Hud, Lines, AMBER, DIM, GREEN, RED, TEXT};
+use std::cmp::Ordering;
+use versus::{Stage, Versus};
 use std::io;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -40,6 +48,8 @@ enum Screen {
     Paused,
     /// The verdict over the board.
     Result,
+    /// Versus: hosting, browsing the LAN, or dialling.
+    Lobby,
 }
 
 struct App {
@@ -56,6 +66,8 @@ struct App {
     audio: Audio,
     /// Segments heard this level, for the climbing notes.
     heard: u32,
+    /// A versus match, from its lobby on.
+    vs: Option<Versus>,
 }
 
 fn seed() -> u64 {
@@ -96,6 +108,7 @@ impl App {
             area: Rect::new(0, 0, 80, 24),
             audio,
             heard: 0,
+            vs: None,
         }
     }
 
@@ -124,13 +137,18 @@ impl App {
         if a != Act::Quit && !matches!(a, Act::Point { click: false, .. }) {
             debug!("act {a:?} on {:?}", self.screen);
         }
+        if self.vs.is_some() && self.versus_act(a) {
+            return;
+        }
         match (self.screen, a) {
             (_, Act::Mute) => {
                 self.audio.toggle_mute();
                 info!("muted {}", self.audio.muted);
             }
             (_, Act::Quit) => {
-                if self.screen != Screen::Title {
+                if self.vs.is_some() {
+                    self.leave();
+                } else if self.screen != Screen::Title {
                     self.to_title();
                 }
                 self.quit = true;
@@ -140,6 +158,16 @@ impl App {
                 self.start_level(1, 0);
             }
             (Screen::Title, Act::Back) => self.quit = true,
+            (Screen::Title, Act::Host) => {
+                self.audio.play(Sfx::Select);
+                self.vs = Some(Versus::host());
+                self.screen = Screen::Lobby;
+            }
+            (Screen::Title, Act::Join) => {
+                self.audio.play(Sfx::Select);
+                self.vs = Some(Versus::browse());
+                self.screen = Screen::Lobby;
+            }
             (Screen::Card, Act::Ok | Act::Point { click: true, .. }) => {
                 self.audio.play(Sfx::Select);
                 self.screen = Screen::Play;
@@ -160,7 +188,7 @@ impl App {
                 info!("stopped");
             }
             (Screen::Play, Act::Point { x, y, click }) => {
-                if let Some(pos) = render::tile_at(&render::layout(self.area), x, y) {
+                if let Some(pos) = render::tile_at(&render::layout(self.my_area()), x, y) {
                     self.cursor = true;
                     self.game.cursor = pos;
                     if click {
@@ -184,6 +212,7 @@ impl App {
 
     fn update(&mut self, dt: f32) {
         self.t += dt;
+        self.versus_update();
         let before = self.game.phase;
         if self.screen == Screen::Play {
             self.game.tick(dt);
@@ -201,9 +230,16 @@ impl App {
                 _ => info!("{e:?}"),
             }
             self.sound(e);
+            self.versus_event(e);
             if let Event::Done { .. } = e {
                 self.screen = Screen::Result;
             }
+        }
+        let view = matches!(self.screen, Screen::Play | Screen::Result).then(|| self.game.view());
+        if let Some(vs) = &mut self.vs
+            && vs.stage == Stage::Match
+        {
+            vs.keep_up(view);
         }
         let flowing = self.screen == Screen::Play && self.game.phase == Phase::Flowing;
         let rate = if flowing { 1.0 / self.game.segment_time() } else { 0.0 };
@@ -238,6 +274,357 @@ impl App {
         }
     }
 
+    // ------------------------------------------------------------- versus
+
+    /// The part of the screen with my board: the left half when the rival's
+    /// board fits beside it.
+    fn my_area(&self) -> Rect {
+        let a = self.area;
+        if self.vs.as_ref().is_some_and(|v| v.stage == Stage::Match) && a.width >= 2 * render::NEED_W + 2 {
+            Rect::new(a.x, a.y, a.width / 2, a.height)
+        } else {
+            a
+        }
+    }
+
+    /// Handle what a match handles differently; `false` passes `a` on to the
+    /// solo handling (moving, laying, fast flow, the mouse).
+    fn versus_act(&mut self, a: Act) -> bool {
+        let Some(vs) = self.vs.as_mut() else { return false };
+        match (self.screen, a) {
+            (_, Act::Mute | Act::Quit) => false,
+            (Screen::Lobby, Act::Move(engine::Dir::Up)) => {
+                vs.pick = vs.pick.saturating_sub(1);
+                true
+            }
+            (Screen::Lobby, Act::Move(engine::Dir::Down)) => {
+                vs.pick = (vs.pick + 1).min(vs.found.len().saturating_sub(1));
+                true
+            }
+            (Screen::Lobby, Act::Ok) => {
+                if vs.stage == Stage::Browsing {
+                    vs.join_picked();
+                } else if vs.stage == Stage::Gone {
+                    self.leave();
+                }
+                true
+            }
+            (Screen::Lobby, Act::Back) => {
+                self.leave();
+                true
+            }
+            (Screen::Lobby, _) => true,
+            (Screen::Card, Act::Ok | Act::Point { click: true, .. }) => {
+                if vs.stage == Stage::Gone {
+                    self.leave();
+                } else if !vs.me_ready {
+                    vs.me_ready = true;
+                    vs.send(Msg::Ready);
+                    self.audio.play(Sfx::Select);
+                    if vs.host && vs.rival_ready {
+                        self.go();
+                    }
+                }
+                true
+            }
+            (Screen::Card | Screen::Play | Screen::Result, Act::Back) => {
+                self.leave();
+                true
+            }
+            // no pausing a race
+            (Screen::Play, Act::Pause) => true,
+            (Screen::Result, Act::Ok | Act::Point { click: true, .. }) => {
+                if vs.stage == Stage::Gone || vs.match_over() {
+                    self.leave();
+                } else if vs.host && vs.settle_round().is_some() {
+                    self.host_next_round();
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Out of the match, back to the title; dropping the network closes it.
+    fn leave(&mut self) {
+        if let Some(vs) = self.vs.take() {
+            info!("versus: leaving, wins {:?}", vs.wins);
+        }
+        self.screen = Screen::Title;
+        self.audio.set_stream(0.0, 0);
+    }
+
+    fn begin_round(&mut self, round: u32, level: u32, seed: u64) {
+        if let Some(vs) = &mut self.vs {
+            vs.new_round(round);
+        }
+        self.game = Game::new(Level::new(level), seed, 0);
+        self.heard = 0;
+        self.screen = Screen::Card;
+        info!("versus: round {round}, level {level}, seed {seed}");
+    }
+
+    fn host_next_round(&mut self) {
+        let Some(vs) = self.vs.as_mut() else { return };
+        let round = vs.round + 1;
+        let s = seed();
+        vs.send(Msg::Round { round, level: round, seed: s, wins: vs.wins });
+        self.begin_round(round, round, s);
+    }
+
+    /// Host: both ready, start the round on both sides.
+    fn go(&mut self) {
+        if let Some(vs) = &mut self.vs {
+            vs.send(Msg::Go);
+        }
+        self.screen = Screen::Play;
+        info!("versus: go");
+    }
+
+    fn versus_update(&mut self) {
+        let Some(vs) = self.vs.as_mut() else { return };
+        if vs.stage == Stage::Browsing {
+            vs.refresh();
+        }
+        let mut evts = Vec::new();
+        while let Some(e) = vs.poll() {
+            evts.push(e);
+        }
+        for e in evts {
+            self.on_net(e);
+        }
+    }
+
+    fn on_net(&mut self, e: Evt) {
+        match &e {
+            Evt::ClientMsg { msg: Msg::View(_) | Msg::Ping } | Evt::HostMsg(Msg::View(_) | Msg::Ping) => {}
+            _ => info!("net {e:?}"),
+        }
+        let Some(vs) = self.vs.as_mut() else { return };
+        match e {
+            Evt::Hosting => vs.note = "waiting for a rival on the LAN...".into(),
+            Evt::Connected => vs.note = "connected, waiting for the host...".into(),
+            Evt::Failed(why) => {
+                vs.stage = Stage::Gone;
+                vs.note = why;
+            }
+            Evt::ClientJoined { name } => {
+                vs.rival = Some(name);
+                vs.stage = Stage::Match;
+                if let Some(n) = &vs.net {
+                    n.send(net::Cmd::Beacon { players: 2, in_game: true });
+                }
+                let me = vs.me.clone();
+                vs.send(Msg::Welcome { name: me });
+                self.host_next_round();
+            }
+            Evt::ClientMsg { msg } | Evt::HostMsg(msg) => self.on_msg(msg),
+            Evt::ClientLeft | Evt::Disconnected => {
+                if vs.stage != Stage::Gone {
+                    vs.note = format!("{} left the match", vs.rival_name());
+                    vs.stage = Stage::Gone;
+                }
+                if matches!(self.screen, Screen::Card | Screen::Play) {
+                    self.screen = Screen::Result;
+                }
+            }
+        }
+    }
+
+    fn on_msg(&mut self, m: Msg) {
+        let Some(vs) = self.vs.as_mut() else { return };
+        match m {
+            Msg::Welcome { name } => {
+                vs.rival = Some(name);
+                vs.stage = Stage::Match;
+            }
+            Msg::Reject { reason } => {
+                vs.stage = Stage::Gone;
+                vs.note = reason;
+            }
+            Msg::Round { round, level, seed, wins } => {
+                vs.wins = [wins[1], wins[0]];
+                vs.stage = Stage::Match;
+                self.begin_round(round, level, seed);
+            }
+            Msg::Ready => {
+                vs.rival_ready = true;
+                if vs.host && vs.me_ready && self.screen == Screen::Card {
+                    self.go();
+                }
+            }
+            Msg::Go => {
+                if self.screen == Screen::Card {
+                    self.screen = Screen::Play;
+                }
+            }
+            Msg::View(v) => vs.rival_view = Some(v),
+            Msg::Junk { count, seed } => {
+                if self.screen == Screen::Play && !self.game.over() {
+                    let hit = self.game.junk(count, seed);
+                    info!("versus: junk landed on {hit:?}");
+                    if !hit.is_empty() {
+                        self.audio.play(Sfx::Junk);
+                    }
+                }
+            }
+            Msg::Done(end) => {
+                vs.theirs = Some(end);
+                vs.settle_round();
+            }
+            Msg::Hello { .. } | Msg::Ping => {}
+        }
+    }
+
+    /// My board's events, as they concern the rival: junk and the round's end.
+    fn versus_event(&mut self, e: Event) {
+        let Some(vs) = self.vs.as_mut() else { return };
+        match e {
+            Event::Segment { looped, .. } => {
+                vs.toward_junk += 1;
+                let mut count = 0;
+                if vs.toward_junk >= versus::JUNK_EVERY {
+                    vs.toward_junk = 0;
+                    count += 1;
+                }
+                if looped {
+                    count += 1;
+                }
+                if count > 0 {
+                    vs.send(Msg::Junk { count, seed: seed() });
+                }
+            }
+            Event::Done { ok, .. } => {
+                let end = RoundEnd { ok, piped: self.game.piped, score: self.game.score };
+                vs.mine = Some(end);
+                vs.send(Msg::Done(end));
+                vs.settle_round();
+            }
+            _ => {}
+        }
+    }
+
+    fn lobby_lines(&self) -> Lines {
+        let Some(vs) = &self.vs else { return Vec::new() };
+        let line = |s: &str, st: Style| (s.to_string(), st);
+        let mut l = Vec::new();
+        match vs.stage {
+            Stage::Hosting => {
+                l.push(line("host a versus match", bold(GREEN)));
+                l.push(line("", style(TEXT)));
+                l.push(line(&vs.note, style(TEXT)));
+                l.push(line(&format!("others see it as \"{}\" under C", vs.me), style(DIM)));
+            }
+            Stage::Browsing => {
+                l.push(line("versus matches on the LAN", bold(GREEN)));
+                l.push(line("", style(TEXT)));
+                if vs.found.is_empty() {
+                    l.push(line("searching...", style(DIM)));
+                    l.push(line("(someone presses V on their title screen)", style(DIM)));
+                }
+                for (i, f) in vs.found.iter().enumerate() {
+                    let busy = if f.beacon.in_game || f.beacon.players >= 2 { "  (playing)" } else { "" };
+                    let mark = if i == vs.pick { "▶ " } else { "  " };
+                    let st = if i == vs.pick { bold(AMBER) } else { style(TEXT) };
+                    l.push(line(&format!("{mark}{}{busy}", f.beacon.name), st));
+                }
+                if !vs.note.is_empty() {
+                    l.push(line(&vs.note, style(RED)));
+                }
+            }
+            Stage::Joining | Stage::Match => {
+                l.push(line("versus", bold(GREEN)));
+                l.push(line("", style(TEXT)));
+                l.push(line(&vs.note, style(TEXT)));
+            }
+            Stage::Gone => {
+                l.push(line("no match", bold(RED)));
+                l.push(line("", style(TEXT)));
+                l.push(line(&vs.note, style(TEXT)));
+            }
+        }
+        l.push(line("", style(TEXT)));
+        let keys = match vs.stage {
+            Stage::Browsing if !vs.found.is_empty() => "Enter: join      Esc: back",
+            Stage::Gone => "Enter or Esc: back",
+            _ => "Esc: back",
+        };
+        l.push(line(keys, bold(AMBER)));
+        l
+    }
+
+    /// The card and verdict of a versus round.
+    fn versus_overlay(&self, vs: &Versus) -> Option<Lines> {
+        let g = &self.game;
+        let lv = &g.level;
+        let rival = vs.rival_name();
+        let line = |s: &str, st: Style| (s.to_string(), st);
+        let score = format!("match {} : {}   first to {}", vs.wins[0], vs.wins[1], versus::WINS_NEEDED);
+        match self.screen {
+            Screen::Card => {
+                let mut l = vec![
+                    line(&format!("round {}  vs {rival}", vs.round), bold(GREEN)),
+                    line(&score, style(DIM)),
+                    line("", style(TEXT)),
+                    line(&format!("$ {} | ./level {}", lv.cmd, lv.n), style(TEXT)),
+                    line(&format!("pipe {} segments; the same board for both", lv.required), style(TEXT)),
+                    line(&format!("every {} segments you pipe lock a cell on {rival}'s", versus::JUNK_EVERY), style(DIM)),
+                    line("", style(TEXT)),
+                ];
+                let ready = if vs.stage == Stage::Gone {
+                    line(&vs.note, bold(RED))
+                } else if !vs.me_ready {
+                    line(if vs.rival_ready { "Enter when ready (rival is ready)" } else { "Enter when ready" }, bold(AMBER))
+                } else {
+                    line(&format!("waiting for {rival}..."), style(AMBER))
+                };
+                l.push(ready);
+                Some(l)
+            }
+            Screen::Result => {
+                let mut l = Vec::new();
+                let end = |e: Option<RoundEnd>| match e {
+                    Some(RoundEnd { ok: true, piped, .. }) => format!("[exit 0]  {piped} segments"),
+                    Some(RoundEnd { ok: false, piped, .. }) => format!("Broken pipe  {piped} of {}", lv.required),
+                    None => "still piping...".into(),
+                };
+                let mine_ok = vs.mine.is_some_and(|e| e.ok);
+                l.push(line(&format!("you:  {}", end(vs.mine)), bold(if mine_ok { GREEN } else { RED })));
+                l.push(line(&format!("{rival}:  {}", end(vs.theirs)), style(TEXT)));
+                l.push(line("", style(TEXT)));
+                if let (Some(m), Some(t)) = (vs.mine, vs.theirs) {
+                    let (s, c) = match versus::verdict(m, t) {
+                        Ordering::Greater => ("round to you".to_string(), GREEN),
+                        Ordering::Less => (format!("round to {rival}"), RED),
+                        Ordering::Equal => ("a draw".to_string(), AMBER),
+                    };
+                    l.push(line(&s, bold(c)));
+                }
+                l.push(line(&score, style(TEXT)));
+                if vs.match_over() {
+                    let s = if vs.wins[0] > vs.wins[1] { "you take the match".to_string() } else { format!("{rival} takes the match") };
+                    l.push(line(&s, bold(if vs.wins[0] > vs.wins[1] { GREEN } else { RED })));
+                }
+                l.push(line("", style(TEXT)));
+                let foot = if vs.stage == Stage::Gone {
+                    l.insert(0, line(&vs.note, bold(RED)));
+                    "Enter: back to the prompt".to_string()
+                } else if vs.match_over() {
+                    "Enter: back to the prompt".to_string()
+                } else if vs.mine.is_none() || vs.theirs.is_none() {
+                    format!("waiting for the round to end...")
+                } else if vs.host {
+                    "Enter: next round".to_string()
+                } else {
+                    format!("waiting for {rival} to start the next round")
+                };
+                l.push(line(&foot, bold(AMBER)));
+                Some(l)
+            }
+            _ => None,
+        }
+    }
+
     fn snapshot_log(&self) {
         let g = &self.game;
         debug!(
@@ -247,6 +634,9 @@ impl App {
     }
 
     fn overlay(&self) -> Option<Lines> {
+        if let Some(vs) = &self.vs {
+            return self.versus_overlay(vs);
+        }
         let g = &self.game;
         let lv = &g.level;
         let line = |s: &str, st: Style| (s.to_string(), st);
@@ -327,8 +717,36 @@ impl App {
             render::draw_title(buf, area, self.hi, self.last, self.t);
             return;
         }
-        let hud = Hud { hi: self.hi, paused: self.screen == Screen::Paused, cursor: self.cursor && self.screen == Screen::Play };
-        render::draw_play(buf, area, &self.game, &hud, self.overlay().as_ref(), self.t);
+        if self.screen == Screen::Lobby {
+            render::draw_lobby(buf, area, &self.lobby_lines(), self.t);
+            return;
+        }
+        let cursor = self.cursor && self.screen == Screen::Play;
+        let Some(vs) = &self.vs else {
+            let hud = Hud { title: "SIGPIPE".into(), hi: Some(self.hi), extra: Vec::new(), paused: self.screen == Screen::Paused, cursor };
+            render::draw_play(buf, area, &self.game, &hud, self.overlay().as_ref(), self.t);
+            return;
+        };
+        let rival = vs.rival_name().to_string();
+        let mut extra = vec![("match".to_string(), format!("{}:{}", vs.wins[0], vs.wins[1]))];
+        let mine = self.my_area();
+        let side = mine != area;
+        if !side && let Some(v) = &vs.rival_view {
+            extra.insert(0, (rival.chars().take(10).collect(), format!("{}/{}", v.piped, self.game.level.required)));
+        }
+        let hud = Hud { title: "SIGPIPE".into(), hi: None, extra, paused: false, cursor };
+        render::draw_play(buf, mine, &self.game, &hud, self.overlay().as_ref(), self.t);
+        if side {
+            let theirs = Rect::new(area.x + mine.width, area.y, area.width - mine.width, area.height);
+            match &vs.rival_view {
+                Some(v) => {
+                    let g = Game::from_view(v);
+                    let hud = Hud { title: rival, hi: None, extra: Vec::new(), paused: false, cursor: true };
+                    render::draw_play(buf, theirs, &g, &hud, None, self.t);
+                }
+                None => render::draw_waiting(buf, theirs, &format!("{rival}'s board shows here once the round starts")),
+            }
+        }
     }
 }
 
@@ -350,7 +768,7 @@ fn main() -> io::Result<()> {
 
 fn run(level: u32) -> io::Result<()> {
     let mut terminal = ratatui::init();
-    execute!(io::stdout(), EnableMouseCapture)?;
+    execute!(io::stdout(), EnableMouseCapture, EnableFocusChange)?;
     info!("start, level {level}");
     let muted = std::env::args().any(|a| a == "--mute");
     let mut app = App::new(level, load_hi(), Audio::new(muted));
@@ -388,7 +806,7 @@ fn run(level: u32) -> io::Result<()> {
             break Err(e);
         }
     };
-    let _ = execute!(io::stdout(), DisableMouseCapture);
+    let _ = execute!(io::stdout(), DisableMouseCapture, DisableFocusChange);
     ratatui::restore();
     info!("quit");
     result
@@ -401,7 +819,9 @@ fn shot(secs: f32, level: u32, seed: u64, (moves, deal): (&str, &[engine::Piece]
     let mut app = App::new(level, 0, Audio::new(true));
     app.area = Rect::new(0, 0, w, h);
     app.game = Game::new(Level::new(level), seed, 0);
-    app.game.script(deal);
+    if !deal.is_empty() {
+        app.game.script(deal);
+    }
     app.screen = match screen {
         Some("title") => Screen::Title,
         Some("card") => Screen::Card,

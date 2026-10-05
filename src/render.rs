@@ -298,6 +298,9 @@ fn draw_board(buf: &mut Buffer, l: &Layout, g: &Game, t: f32, cursor: bool, hide
                 wall = mix(wall, RED, k);
                 bg = mix(bg, Color::Rgb(90, 20, 8), k);
             }
+            if let Some((_, left)) = g.junked.iter().find(|(p, _)| *p == (tx, ty)) {
+                bg = mix(bg, Color::Rgb(120, 24, 10), left / crate::engine::JUNK_FLASH);
+            }
             if here && g.lock > 0.0 {
                 bg = mix(bg, Color::Rgb(90, 20, 8), 0.6);
             }
@@ -352,7 +355,12 @@ fn draw_spill(buf: &mut Buffer, l: &Layout, at: (usize, usize), dir: Dir, st: f3
 }
 
 pub struct Hud {
-    pub hi: i64,
+    /// Top left of the status line: the game's name, or the rival's.
+    pub title: String,
+    /// The hi score (solo).
+    pub hi: Option<i64>,
+    /// More status items at the end (versus: the rival, the match).
+    pub extra: Vec<(String, String)>,
     pub paused: bool,
     pub cursor: bool,
 }
@@ -366,7 +374,7 @@ pub fn draw_play(buf: &mut Buffer, area: Rect, g: &Game, hud: &Hud, overlay: Opt
     }
     // status line
     let (sx, sy) = l.status;
-    text(buf, sx, sy, "SIGPIPE", bold(AMBER));
+    text(buf, sx, sy, &hud.title.chars().take(8).collect::<String>(), bold(AMBER));
     let mut x = l.board_box.x + 1;
     let mut item = |label: &str, value: String, col: Color| {
         text(buf, x, sy, label, style(DIM));
@@ -382,7 +390,12 @@ pub fn draw_play(buf: &mut Buffer, area: Rect, g: &Game, hud: &Hud, overlay: Opt
         let col = if g.crosses >= crate::engine::LOOPS_FOR_BONUS { GREEN } else { TEXT };
         item("loops", format!("{}/{}", g.crosses, crate::engine::LOOPS_FOR_BONUS), col);
     }
-    item("hi", hud.hi.max(g.score).to_string(), DIM);
+    if let Some(hi) = hud.hi {
+        item("hi", hi.max(g.score).to_string(), DIM);
+    }
+    for (label, value) in &hud.extra {
+        item(label, value.clone(), AMBER);
+    }
 
     // the queue, next piece on top
     frame(buf, l.queue, "next", DIM, BG);
@@ -444,6 +457,25 @@ fn too_small(buf: &mut Buffer, area: Rect) {
     centered(buf, area, y + 1, &s, style(DIM));
 }
 
+/// A screen with the logo and a panel of text (the versus lobby).
+pub fn draw_lobby(buf: &mut Buffer, area: Rect, lines: &Lines, t: f32) {
+    fill(buf, area, BG);
+    let top = area.y + 1;
+    for (i, row) in LOGO.iter().enumerate() {
+        centered(buf, area, top + i as u16, row, bold(AMBER));
+    }
+    let sw = 44.min(area.width.saturating_sub(4));
+    stream(buf, area.x + (area.width - sw) / 2, top + 4, sw, t);
+    let rest = Rect::new(area.x, top + 7, area.width, area.height.saturating_sub(8));
+    panel(buf, rest, lines);
+}
+
+/// Where a waiting rival's board will be.
+pub fn draw_waiting(buf: &mut Buffer, area: Rect, s: &str) {
+    fill(buf, area, BG);
+    centered(buf, area, area.y + area.height / 2, s, style(DIM));
+}
+
 const LOGO: [&str; 3] = ["╔═╗╦╔═╗╔═╗╦╔═╗╔═╗", "╚═╗║║ ╦╠═╝║╠═╝║╣ ", "╚═╝╩╚═╝╩  ╩╩  ╚═╝"];
 
 /// A straight pipe across the screen with packets of data running through it.
@@ -459,11 +491,11 @@ fn stream(buf: &mut Buffer, x0: u16, y0: u16, w: u16, t: f32) {
 
 pub fn draw_title(buf: &mut Buffer, area: Rect, hi: i64, last: Option<i64>, t: f32) {
     fill(buf, area, BG);
-    if area.width < 50 || area.height < 20 {
+    if area.width < 54 || area.height < 21 {
         too_small(buf, area);
         return;
     }
-    let top = area.y + area.height.saturating_sub(20) / 2;
+    let top = area.y + area.height.saturating_sub(21) / 2;
     for (i, row) in LOGO.iter().enumerate() {
         centered(buf, area, top + i as u16, row, bold(AMBER));
     }
@@ -482,6 +514,7 @@ pub fn draw_title(buf: &mut Buffer, area: Rect, hi: i64, last: Option<i64>, t: f
         "lay a piece: Space, Enter or click",
         "fast flow: F    pause: P    mute: M    back: Esc",
         "gamepad: d-pad, A lay, X fast, Start pause",
+        "versus on the LAN: V host a match, C connect to one",
     ];
     for (i, h) in help.iter().enumerate() {
         centered(buf, area, top + 14 + i as u16, h, style(DIM));
@@ -490,7 +523,7 @@ pub fn draw_title(buf: &mut Buffer, area: Rect, hi: i64, last: Option<i64>, t: f
         Some(s) => format!("last run {s}      hi score {hi}"),
         None => format!("hi score {hi}"),
     };
-    centered(buf, area, top + 19, &scores, style(DIM));
+    centered(buf, area, top + 20, &scores, style(DIM));
 }
 
 #[cfg(test)]

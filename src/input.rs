@@ -5,6 +5,11 @@
 //!
 //! Every raw event is logged at debug level before it turns into an action.
 //!
+//! Pads are read straight from the system, so they would drive a game sitting
+//! in a window you've left (playing something else with the same pad). The
+//! terminal reports focus, and pad input is dropped while it's away; terminals
+//! that don't report focus just keep the pad live.
+//!
 //! gilrs counts any device with buttons and two axes as a gamepad, so only devices
 //! that matched SDL's controller database are used; `SIGPIPE_ANY_PAD=1` takes all.
 
@@ -25,6 +30,9 @@ pub enum Act {
     Fast,
     Pause,
     Mute,
+    /// Title: host a versus match, or connect to one.
+    Host,
+    Join,
     Back,
     Quit,
     /// The mouse over a screen cell, and whether it clicked there.
@@ -41,6 +49,9 @@ const STICK_DEADZONE: f32 = 0.5;
 
 pub struct Input {
     pub acts: Vec<Act>,
+    /// The terminal has focus (as far as it tells us).
+    #[cfg_attr(not(feature = "gamepad"), allow(dead_code))]
+    focused: bool,
     #[cfg(feature = "gamepad")]
     gilrs: Option<gilrs::Gilrs>,
     /// The pad direction held (d-pad or stick) and when it next repeats.
@@ -61,6 +72,7 @@ impl Input {
     pub fn new() -> Input {
         Input {
             acts: Vec::new(),
+            focused: true,
             #[cfg(feature = "gamepad")]
             gilrs: match gilrs::Gilrs::new() {
                 Ok(g) => {
@@ -102,11 +114,17 @@ impl Input {
                     KeyCode::Char('f' | 'F') => Act::Fast,
                     KeyCode::Char('p' | 'P') => Act::Pause,
                     KeyCode::Char('m' | 'M') => Act::Mute,
+                    KeyCode::Char('v' | 'V') => Act::Host,
+                    KeyCode::Char('c' | 'C') => Act::Join,
                     KeyCode::Esc | KeyCode::Backspace => Act::Back,
                     KeyCode::Char('q' | 'Q') => Act::Quit,
                     _ => return,
                 };
                 self.acts.push(act);
+            }
+            Event::FocusLost | Event::FocusGained => {
+                self.focused = ev == Event::FocusGained;
+                log::info!("focus {}", if self.focused { "gained" } else { "lost: pads ignored" });
             }
             Event::Mouse(m) => {
                 let click = match m.kind {
@@ -132,6 +150,10 @@ impl Input {
             while let Some(ev) = g.next_event() {
                 let pad = g.gamepad(ev.id);
                 if !usable_pad(&pad) {
+                    continue;
+                }
+                if !self.focused {
+                    (self.dpad, self.stick, self.held) = (None, None, None);
                     continue;
                 }
                 match ev.event {

@@ -37,9 +37,11 @@ pub enum Sfx {
     Pass,
     Fail,
     Select,
+    /// A rival's junk landing.
+    Junk,
 }
 
-const ALL_SFX: [Sfx; 15] = [
+const ALL_SFX: [Sfx; 16] = [
     Sfx::Place,
     Sfx::Replace,
     Sfx::Denied,
@@ -55,6 +57,7 @@ const ALL_SFX: [Sfx; 15] = [
     Sfx::Pass,
     Sfx::Fail,
     Sfx::Select,
+    Sfx::Junk,
 ];
 
 /// Notes for the segments: a pentatonic scale over three octaves.
@@ -299,6 +302,11 @@ fn render_sfx(s: Sfx) -> Vec<f32> {
         }
         Sfx::Pass => tune(&[(72.0, 0.1), (76.0, 0.1), (79.0, 0.1), (84.0, 0.35)], 0.2, tri),
         Sfx::Fail => tune(&[(64.0, 0.18), (60.0, 0.18), (55.0, 0.18), (48.0, 0.5)], 0.18, square),
+        // static: line noise chopped into a stutter
+        Sfx::Junk => synth(0.3, |t, n| {
+            let gate = if (t * 40.0) as u32 % 2 == 0 { 1.0 } else { 0.3 };
+            n.next() * gate * (1.0 - t / 0.3) * 0.3
+        }),
         Sfx::Select => tune(&[(84.0, 0.05), (91.0, 0.08)], 0.14, square),
     }
 }

@@ -8,12 +8,13 @@ else our own.
 
 **Status** (2026-10-05): first playable cut. Classic rules, the Unix data-stream
 theme (chosen by David on 2026-10-05), endless levels that tighten, locked cells,
-the `nul` sink, keyboard, mouse and gamepad, session logging, a saved hi score.
+the `nul` sink, buffers and valves, synthesised sound, versus over iroh on the
+LAN, keyboard, mouse and gamepad, session logging, a saved hi score.
 The rules and numbers below are a first proposal for David to play and tune; not
 yet approved. Own git repo, private at github.com/theasciiverse/sigpipe.
 
 ```bash
-cargo run --release                        # play (--level N skips the title)
+cargo run --release                        # play (--level N skips the title, --mute)
 RUST_LOG=debug cargo run --release 2>sigpipe.log
 cargo test
 # headless: play SECS seconds, print the screen (or --cells | tools/shot.py as a PNG)
@@ -22,8 +23,10 @@ cargo run -- --shot 45 --seed 7 --deal "+7JL|F--" --moves "PRPDPLPUUPUPRPRP" --c
 ```
 
 Code: `src/engine.rs` (board, pieces, flow, scoring, level numbers, tests),
-`src/render.rs` (tile art, half-block data, HUD, title), `src/input.rs`,
-`src/main.rs` (screens, the loop, headless shots).
+`src/render.rs` (tile art, half-block data, HUD, title, lobby), `src/input.rs`,
+`src/audio.rs`, `src/versus.rs` (the match), `src/proto.rs`, `src/net.rs` and
+`src/lan.rs` (iroh and LAN discovery, from Panzer), `src/main.rs` (screens, the
+loop, headless shots).
 
 ## First cut, as built (2026-10-05)
 
@@ -77,6 +80,20 @@ Code: `src/engine.rs` (board, pieces, flow, scoring, level numbers, tests),
   hiss and falling gurgle for a broken pipe. While data flows, a hum and a
   modem-like chatter whose rate follows the flow (busier with more fronts). M
   mutes, `--mute` starts muted.
+- **Versus over iroh** (LAN; Tetrix's attack model): V on the title hosts, C
+  lists matches on the LAN (beacon on UDP 31459, next to Tetrix's 31457 and
+  Panzer's 31458). Each round both get the same level, board and bag and play
+  their own copy at once; every 3 segments you pipe, and every loop through a
+  crossover, locks a free cell on the rival's board (never the source's front,
+  `nul`'s mouth or their cursor). Passing beats failing, then more segments,
+  then score; first to 3 rounds, each a level harder. No pausing a race; Esc
+  leaves. The rival's board is drawn live beside yours when the terminal is 144
+  columns or wider, otherwise their progress sits in the status line. Tested
+  2026-10-05 with two instances on one machine: discovery, joining, rounds,
+  results, junk landing, the side-by-side view.
+- Pads are ignored while the terminal reports it has lost focus: David was
+  playing another game with the same pad and SIGPIPE, open in another window,
+  took the presses (2026-10-05).
 - Pieces dealt from a shuffled bag of 13 (two of each straight and corner, one
   crossover), plus one of each tee from level 2 (17), Tetris-style. Plain random odds (corners 14% each) were tried first
   and left David waiting on one corner for too long (2026-10-05); with the bag a
@@ -171,4 +188,7 @@ real-time pressure against a moving front; Ohm is a solver puzzle.
 - [x] Crossover plus `tee` splitter (David, 2026-10-05)
 - [x] Buffers, one-way valves, the five-loop bonus (2026-10-05)
 - [x] Sound (2026-10-05), synthesised in `src/audio.rs` after Panzer's
-- [ ] Next: versus over iroh
+- [x] Versus over iroh on the LAN (2026-10-05)
+- [ ] Next: versus over the internet (an iroh ticket to paste, as the LAN
+  beacon can't cross networks), a pad-driven way into versus (V and C are
+  keyboard only)
