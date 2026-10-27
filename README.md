@@ -10,9 +10,19 @@ buffers, sink it in `nul`. Let it reach an open end and that's the signal:
 `cat: write error: Broken pipe`, `[exit 141]`. Endless levels, each one
 tighter, and versus on the local network.
 
+## Play
+
+With [av](https://asciiverse.sh), the Asciiverse client:
+
 ```
-cargo run --release
+av install sigpipe
+av play sigpipe
 ```
+
+Or download the archive for your system from this repository's Releases,
+unpack it and run `./sigpipe` (`sigpipe.exe` on Windows).
+
+To build it yourself: `cargo run --release`.
 
 Fits an 80x24 terminal.
 
