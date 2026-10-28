@@ -19,9 +19,6 @@ av install sigpipe
 av play sigpipe
 ```
 
-Or download the archive for your system from this repository's Releases,
-unpack it and run `./sigpipe`.
-
 To build it yourself: `cargo run --release`.
 
 Fits an 80x24 terminal.
