@@ -12,6 +12,7 @@ the `nul` sink, buffers and valves, synthesised sound, versus over iroh on the
 LAN, keyboard, mouse and gamepad, session logging, a saved hi score.
 The rules and numbers below are a first proposal for David to play and tune; not
 yet approved. Own git repo, private at github.com/theasciiverse/sigpipe.
+Version 0.3.0 (2026-10-28). What comes next, release by release, is in `ROADMAP.md`.
 
 ```bash
 cargo run --release                        # play (--level N skips the title, --mute)
