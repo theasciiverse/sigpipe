@@ -52,3 +52,7 @@ Session log for bug reports: `RUST_LOG=debug sigpipe 2>sigpipe.log`
 The mechanics are those of the late-1980s pipe-laying puzzle games;
 everything else is new. Sound is synthesised in the game. Networking uses
 [iroh](https://iroh.computer).
+
+## Licence
+
+MIT; see [LICENSE](LICENSE).

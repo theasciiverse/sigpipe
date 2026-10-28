@@ -2,6 +2,7 @@
 name = "sigpipe"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
 description = "Asciiverse pipe-laying race against the data stream, after Pipe Mania; Rust + Ratatui"
 
 [dependencies]
