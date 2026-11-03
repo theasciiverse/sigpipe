@@ -13,6 +13,12 @@ and numbers still a first proposal. 1.0.0 is when everything below is in.
 - [x] Versus over iroh on the LAN, first to three rounds
 - [x] Keyboard, mouse and gamepad; session logging
 
+## 0.3.1: built
+
+- [x] Gamepads work on Windows: gilrs reads them through XInput, since its
+  default (Windows Gaming Input) only reports to a program with a focused
+  window of its own, which a terminal game never has
+
 ## 0.4.0: the rules settled
 
 - [ ] Play the first cut and tune its numbers: countdown, flow speed, required
